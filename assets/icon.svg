@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- LeetCode Blind Practice icon: a closed eye between code brackets.
+       Render to PNG with `npm run icons`. icon-small.svg is the 16/32 px version. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#0b1220"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bg)"/>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="27.25" fill="none" stroke="#334155" stroke-width="1.5"/>
+
+  <!-- code brackets -->
+  <g fill="none" stroke="#64748b" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M27 46 L15 62 L27 78"/>
+    <path d="M101 46 L113 62 L101 78"/>
+  </g>
+
+  <!-- closed eye: lid line with lashes -->
+  <g fill="none" stroke="#22c55e" stroke-width="8" stroke-linecap="round">
+    <path d="M36 56 Q64 84 92 56"/>
+    <path d="M47.5 66.5 L42 76"/>
+    <path d="M64 70.5 L64 81"/>
+    <path d="M80.5 66.5 L86 76"/>
+  </g>
+</svg>

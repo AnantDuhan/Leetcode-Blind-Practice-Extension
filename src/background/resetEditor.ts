@@ -1,0 +1,142 @@
+import type { ResetCodeResult } from "../shared/messages";
+
+/**
+ * Replaces the problem's code with LeetCode's default template, the same
+ * result as the editor's Reset button, and removes drafts saved in other
+ * languages so switching language doesn't reveal an old solution either.
+ *
+ * Runs in the PAGE's JavaScript world (chrome.scripting, world: "MAIN"),
+ * because the Monaco editor object isn't visible to content scripts. The
+ * function is serialized, so it must be self-contained: no imports, no
+ * references to anything outside its own body.
+ *
+ * Verified against leetcode.com in October 2026:
+ * - Default code comes from the public GraphQL `question.codeSnippets`.
+ * - Drafts live in IndexedDB "LeetCode-problems" / store "problem_code",
+ *   keyed "<questionId>_<userId>_<langSlug>" (plus "...-updated-time").
+ * - The language comes from localStorage "<questionId>_<userId>_lang",
+ *   falling back to "global_lang".
+ * - LeetCode autosaves on executeEdits() but NOT on model.setValue(), so we
+ *   edit first (saves the template) and then setValue() the same text, which
+ *   clears undo history so Ctrl+Z can't bring the old solution back.
+ */
+export async function resetEditorToDefault(slug: string): Promise<ResetCodeResult> {
+  interface Range { startLineNumber: number }
+  interface Model {
+    uri: { scheme: string };
+    getValue(): string;
+    setValue(value: string): void;
+    getFullModelRange(): Range;
+  }
+  interface Editor {
+    getModel(): Model | null;
+    executeEdits(source: string, edits: { range: Range; text: string }[]): boolean;
+  }
+  interface MonacoGlobal {
+    editor?: { getEditors?: () => Editor[] };
+  }
+  interface Question {
+    questionId: string;
+    codeSnippets: { langSlug: string; code: string }[] | null;
+  }
+
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const parseJson = (raw: string | null): unknown => {
+    try {
+      return raw === null ? null : JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+
+  // 1. Default code for every language.
+  let question: Question | null;
+  try {
+    const response = await fetch("/graphql/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        query:
+          "query blindPracticeDefaultCode($titleSlug: String!) {" +
+          " question(titleSlug: $titleSlug) { questionId codeSnippets { langSlug code } } }",
+        variables: { titleSlug: slug },
+      }),
+    });
+    question = (await response.json())?.data?.question ?? null;
+  } catch (error) {
+    return { ok: false, reason: `Couldn't load the default code: ${String(error)}` };
+  }
+  if (!question?.codeSnippets?.length) {
+    return { ok: false, reason: "This problem has no default code." };
+  }
+
+  // 2. Wait for the code editor (up to 20 s on a slow load).
+  let editor: Editor | undefined;
+  for (let i = 0; i < 80 && !editor; i++) {
+    const monaco = (window as unknown as { monaco?: MonacoGlobal }).monaco;
+    editor = monaco?.editor?.getEditors?.().find((e) => e.getModel()?.uri.scheme === "file");
+    if (!editor) await sleep(250);
+  }
+  const activeEditor = editor;
+  const model = activeEditor?.getModel();
+  if (!activeEditor || !model) return { ok: false, reason: "The code editor didn't load." };
+  // Let LeetCode finish restoring its saved draft before we replace it.
+  await sleep(1000);
+
+  // 3. Current language.
+  const qid = question.questionId;
+  const langKeyPattern = new RegExp(`^${qid}_\\d+_lang$`);
+  const langKey = Object.keys(localStorage).find((k) => langKeyPattern.test(k));
+  const storedLang = (langKey && parseJson(localStorage.getItem(langKey))) || parseJson(localStorage.getItem("global_lang"));
+  const lang = typeof storedLang === "string" ? storedLang : "cpp";
+  const snippet = question.codeSnippets.find((s) => s.langSlug === lang);
+  if (!snippet) return { ok: false, reason: `No default code for ${lang}.`, lang };
+
+  // 4. Remove drafts this problem has in other languages.
+  let removedDrafts = 0;
+  try {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("LeetCode-problems");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    if (db.objectStoreNames.contains("problem_code")) {
+      const draftPattern = new RegExp(`^${qid}_\\d+_([^_]+?)(-updated-time)?$`);
+      const store = db.transaction("problem_code", "readwrite").objectStore("problem_code");
+      const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {
+        const request = store.getAllKeys();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      for (const key of keys) {
+        const match = draftPattern.exec(String(key));
+        if (match && match[1] !== lang) {
+          store.delete(key);
+          if (!match[2]) removedDrafts++;
+        }
+      }
+      await new Promise<void>((resolve, reject) => {
+        store.transaction.oncomplete = () => resolve();
+        store.transaction.onerror = () => reject(store.transaction.error);
+      });
+    }
+    db.close();
+  } catch {
+    // Not fatal: the current language is still reset below.
+  }
+
+  // 5. Replace the code. executeEdits makes LeetCode save it; setValue then
+  // clears undo history so the old solution can't be recovered with Ctrl+Z.
+  const replace = () => {
+    activeEditor.executeEdits("blind-practice-reset", [{ range: model.getFullModelRange(), text: snippet.code }]);
+    model.setValue(snippet.code);
+  };
+  const before = model.getValue();
+  replace();
+  // If LeetCode's own draft restore landed after our edit, do it once more.
+  await sleep(1200);
+  if (model.getValue() === before && before !== snippet.code) replace();
+
+  return { ok: true, lang, removedDrafts };
+}
