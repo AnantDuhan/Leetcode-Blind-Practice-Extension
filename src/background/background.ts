@@ -12,7 +12,14 @@ const BADGE_COLORS = {
 } as const;
 const DUE_COLOR = "#7c3aed";
 
-chrome.runtime.onInstalled.addListener(() => void updateDueBadge());
+chrome.runtime.onInstalled.addListener((details) => {
+  void updateDueBadge();
+  // Chrome doesn't inject content scripts into tabs that were already open.
+  // After an install or update, add a fresh copy so open LeetCode tabs work
+  // straight away; an old copy left over from the previous version shuts
+  // itself down when it sees the new one.
+  if (details.reason === "install" || details.reason === "update") void injectIntoOpenTabs();
+});
 chrome.runtime.onStartup.addListener(() => void updateDueBadge());
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.history) void updateDueBadge();
@@ -75,6 +82,19 @@ async function setBadge(tabId: number, text: string, state: keyof typeof BADGE_C
     await chrome.action.setBadgeTextColor({ tabId, color: "#ffffff" });
   } catch {
     // The tab was closed between the message and the update.
+  }
+}
+
+async function injectIntoOpenTabs(): Promise<void> {
+  for (const script of chrome.runtime.getManifest().content_scripts ?? []) {
+    if (!script.js?.length || !script.matches?.length) continue;
+    const tabs = await chrome.tabs.query({ url: script.matches });
+    for (const tab of tabs) {
+      if (tab.id === undefined || tab.discarded) continue;
+      chrome.scripting.executeScript({ target: { tabId: tab.id }, files: script.js }).catch(() => {
+        // The tab is loading, closed, or showing an error page; it gets the script on its next load.
+      });
+    }
   }
 }
 

@@ -54,10 +54,12 @@ export async function saveSettings(settings: UserSettings): Promise<void> {
   });
 }
 
-/** Calls `listener` whenever settings change in any tab or in the popup. */
-export function onSettingsChanged(listener: (settings: UserSettings) => void): void {
-  chrome.storage.onChanged.addListener((changes, area) => {
+/** Calls `listener` whenever settings change in any tab or in the popup. Returns an unsubscribe. */
+export function onSettingsChanged(listener: (settings: UserSettings) => void): () => void {
+  const handler = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
     if (area !== "sync" || !changes.settings) return;
     listener(normalizeSettings(changes.settings.newValue as Partial<UserSettings> | undefined));
-  });
+  };
+  chrome.storage.onChanged.addListener(handler);
+  return () => chrome.storage.onChanged.removeListener(handler);
 }

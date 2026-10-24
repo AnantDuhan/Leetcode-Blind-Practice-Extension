@@ -89,21 +89,105 @@ const WATCH_INTERVAL_MS = 3000;
 const WATCH_DURATION_MS = 120_000;
 const THANK_YOU_AFTER = 10;
 
+/**
+ * Lifecycle. When the extension is reloaded, updated or removed, this script
+ * keeps running in open tabs but every chrome.* call throws "Extension context
+ * invalidated". So: check before acting, catch async failures, and shut down
+ * cleanly (UI removed, timers and listeners gone). The background worker
+ * injects a fresh copy into open LeetCode tabs after an install or update, and
+ * a newer copy announces itself so this one steps aside.
+ */
+const INSTANCE = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+let stopped = false;
+let tickTimer: ReturnType<typeof setInterval> | null = null;
+const cleanups: (() => void)[] = [];
+
+function extensionAlive(): boolean {
+  try {
+    return !stopped && !!chrome.runtime?.id;
+  } catch {
+    return false;
+  }
+}
+
+function supersededByNewerCopy(): boolean {
+  return document.documentElement.dataset.noPeekInstance !== INSTANCE;
+}
+
+function shutdown(): void {
+  if (stopped) return;
+  stopped = true;
+  if (tickTimer) clearInterval(tickTimer);
+  if (watch?.timer) clearTimeout(watch.timer);
+  watch = null;
+  for (const cleanup of cleanups.splice(0)) {
+    try {
+      cleanup();
+    } catch {
+      // Removing a chrome.* listener can itself throw once the context is gone.
+    }
+  }
+  ui.destroy();
+}
+
+function isContextInvalidated(error: unknown): boolean {
+  return /extension context invalidated/i.test(String((error as Error)?.message ?? error));
+}
+
+/** Runs async work in the background; a lost extension context shuts this copy down. */
+function bg(work: Promise<unknown>): void {
+  work.catch((error: unknown) => {
+    if (isContextInvalidated(error) || !extensionAlive()) shutdown();
+    else console.warn("[No Peek]", error);
+  });
+}
+
+/** Wraps an event handler: does nothing once shut down, and never throws into the page. */
+function guarded<A extends unknown[]>(handler: (...args: A) => unknown): (...args: A) => void {
+  return (...args: A) => {
+    if (stopped) return;
+    try {
+      if (!extensionAlive() || supersededByNewerCopy()) {
+        shutdown();
+        return;
+      }
+      const result = handler(...args);
+      if (result instanceof Promise) bg(result);
+    } catch (error) {
+      if (isContextInvalidated(error)) shutdown();
+      else console.warn("[No Peek]", error);
+    }
+  };
+}
+
+function listen<K extends keyof WindowEventMap>(
+  target: Window,
+  type: K,
+  handler: (event: WindowEventMap[K]) => unknown,
+  options?: AddEventListenerOptions,
+): void;
+function listen(target: Document, type: string, handler: (event: Event) => unknown, options?: AddEventListenerOptions): void;
+function listen(target: Window | Document, type: string, handler: (event: Event) => unknown, options?: AddEventListenerOptions): void {
+  const wrapped = guarded(handler);
+  target.addEventListener(type, wrapped, options);
+  cleanups.push(() => target.removeEventListener(type, wrapped, options));
+}
+
 const ui = new PracticeUi({
-  onStart: () => void handleStart(),
-  onBack: handleBack,
-  onRevealEarly: () => void handleRevealEarly(),
-  onTogglePause: () => void handleTogglePause(),
-  onRestart: () => void handleRestart(),
-  onSupport: () => {
+  onStart: guarded(handleStart),
+  onBack: guarded(handleBack),
+  onRevealEarly: guarded(handleRevealEarly),
+  onTogglePause: guarded(handleTogglePause),
+  onRestart: guarded(handleRestart),
+  onSupport: guarded(() => {
     thankYou = null;
     void sendMessage({ type: "open-dashboard", hash: "#support" });
     render();
-  },
-  onDismissThanks: () => {
+  }),
+  onDismissThanks: guarded(() => {
     thankYou = null;
     render();
-  },
+  }),
 });
 
 function isLocked(now = Date.now()): boolean {
@@ -219,7 +303,7 @@ function trackPeek(section: LockedSection | null = route?.lockedSection ?? null)
   const slug = route.slug;
   const attemptId = session.attemptId;
   session = { ...session, peeked: true };
-  void markSessionPeeked(slug).then(() => recordPeek(slug, attemptId, Date.now()));
+  bg(markSessionPeeked(slug).then(() => recordPeek(slug, attemptId, Date.now())));
 }
 
 /**
@@ -250,10 +334,10 @@ function watchForAccepted(durationMs = WATCH_DURATION_MS): void {
       await handleSolved(slug, scan.wrong);
       return;
     }
-    if (watch && Date.now() < watch.until) watch.timer = setTimeout(() => void poll(), WATCH_INTERVAL_MS);
+    if (watch && Date.now() < watch.until) watch.timer = setTimeout(() => bg(poll()), WATCH_INTERVAL_MS);
     else watch = null;
   };
-  watch.timer = setTimeout(() => void poll(), WATCH_FIRST_POLL_MS);
+  watch.timer = setTimeout(() => bg(poll()), WATCH_FIRST_POLL_MS);
 }
 
 async function handleSolved(slug: string, wrongSubmissions: number): Promise<void> {
@@ -294,7 +378,7 @@ function handleRouteChange(): void {
   const sameProblem = next?.slug === route?.slug;
   // Leaving a problem in this tab pauses its timer.
   if (!sameProblem && route && session && !isPaused(session) && isLocked()) {
-    void pauseSession(route.slug, "auto");
+    bg(pauseSession(route.slug, "auto"));
   }
   route = next;
   interceptedSection = null;
@@ -303,7 +387,7 @@ function handleRouteChange(): void {
     problemRecord = null;
   }
   render();
-  void refreshSession();
+  bg(refreshSession());
   // LeetCode may open the result page after a submit.
   if (/\/submissions\/\d+/.test(location.pathname)) watchForAccepted();
 }
@@ -318,9 +402,9 @@ async function handleStart(): Promise<void> {
   render();
 
   if (created) {
-    void beginAttempt(slug, started.attemptId, wasDue);
+    bg(beginAttempt(slug, started.attemptId, wasDue));
     if (!problemRecord?.meta) {
-      void fetchMeta(sendMessage, slug).then((meta) => meta && saveMeta(slug, meta));
+      bg(fetchMeta(sendMessage, slug).then((meta) => meta && saveMeta(slug, meta)));
     }
   }
 
@@ -362,7 +446,7 @@ async function handleRestart(): Promise<void> {
 function autoPause(): void {
   if (!route || !session || isPaused(session) || !isLocked()) return;
   // pauseSession is idempotent, so visibilitychange followed by pagehide is fine.
-  void pauseSession(route.slug, "auto");
+  bg(pauseSession(route.slug, "auto"));
 }
 
 /** Resumes an auto-paused timer when this tab is showing the problem again. */
@@ -370,11 +454,13 @@ function maybeAutoResume(): void {
   if (autoPauseBusy || document.visibilityState !== "visible") return;
   if (!route || !session || !isPaused(session) || session.pausedBy !== "auto" || !isLocked()) return;
   autoPauseBusy = true;
-  void resumeSession(route.slug, { onlyIfAuto: true })
-    .then(refreshSession)
-    .finally(() => {
-      autoPauseBusy = false;
-    });
+  bg(
+    resumeSession(route.slug, { onlyIfAuto: true })
+      .then(refreshSession)
+      .finally(() => {
+        autoPauseBusy = false;
+      }),
+  );
 }
 
 function handleVisibilityChange(): void {
@@ -422,35 +508,45 @@ function interceptLockedInteraction(event: Event): void {
 }
 
 async function main(): Promise<void> {
+  // Announce this copy; an older copy still running in this tab steps aside.
+  document.documentElement.dataset.noPeekInstance = INSTANCE;
+
   for (const type of INTERCEPTED_EVENTS) {
-    window.addEventListener(type, interceptLockedInteraction, { capture: true });
+    listen(window, type, interceptLockedInteraction, { capture: true });
   }
 
   settings = await loadSettings();
   ready = true;
 
-  onSettingsChanged((next) => {
-    settings = next;
-    render();
-  });
-  onSessionsChanged(() => void refreshSession());
-  window.addEventListener("popstate", handleRouteChange);
-  document.addEventListener("visibilitychange", handleVisibilityChange);
-  window.addEventListener("pagehide", autoPause);
-  window.addEventListener("click", handleSubmitIntent, { capture: true });
-  window.addEventListener("keydown", handleSubmitIntent, { capture: true });
-  onHistoryChanged(() => void refreshSession());
+  cleanups.push(
+    onSettingsChanged(
+      guarded((next: UserSettings) => {
+        settings = next;
+        render();
+      }),
+    ),
+    onSessionsChanged(guarded(refreshSession)),
+    onHistoryChanged(guarded(refreshSession)),
+  );
+  listen(window, "popstate", handleRouteChange);
+  listen(document, "visibilitychange", handleVisibilityChange);
+  listen(window, "pagehide", autoPause);
+  listen(window, "click", handleSubmitIntent, { capture: true });
+  listen(window, "keydown", handleSubmitIntent, { capture: true });
 
   handleRouteChange();
   // A problem opened in a background tab shouldn't keep a running timer going.
   await refreshSession();
   if (document.visibilityState === "hidden") autoPause();
 
-  setInterval(() => {
-    if (location.href !== currentHref) handleRouteChange();
-    else render();
-    maybeAutoResume();
-  }, TICK_MS);
+  tickTimer = setInterval(
+    guarded(() => {
+      if (location.href !== currentHref) handleRouteChange();
+      else render();
+      maybeAutoResume();
+    }),
+    TICK_MS,
+  );
 }
 
-void main();
+bg(main());
