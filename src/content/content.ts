@@ -79,6 +79,8 @@ let lastToolbarBadge = "";
 let autoPauseBusy = false;
 /** History record for the current problem, for the start card's review note. */
 let problemRecord: ProblemRecord | null = null;
+/** Set while asking whether to keep code that was already in the editor. */
+let codeChoice: { slug: string; busy: boolean } | null = null;
 /** Set while the one-time thank-you is on screen. */
 let thankYou: { solvedProblems: number } | null = null;
 /** Polling for an Accepted submission after Submit was pressed. */
@@ -188,6 +190,8 @@ const ui = new PracticeUi({
     thankYou = null;
     render();
   }),
+  onStartFresh: guarded(handleStartFresh),
+  onKeepCode: guarded(handleKeepCode),
 });
 
 function isLocked(now = Date.now()): boolean {
@@ -217,7 +221,7 @@ function updateToolbarBadge(now: number): void {
 
 function buildView(now: number): ViewState {
   if (!ready || !settings.enabled || !route) {
-    return { badge: null, startCard: null, lock: null, thankYou: null };
+    return { badge: null, startCard: null, lock: null, codeChoice: null, thankYou: null };
   }
 
   const locked = isLocked(now);
@@ -257,6 +261,7 @@ function buildView(now: number): ViewState {
           canRevealEarly: !settings.strictMode,
         }
       : null,
+    codeChoice: codeChoice && codeChoice.slug === route.slug ? { busy: codeChoice.busy } : null,
     thankYou,
   };
 }
@@ -385,6 +390,8 @@ function handleRouteChange(): void {
   if (!sameProblem) {
     session = null;
     problemRecord = null;
+    // Leaving the problem keeps the code: nothing was changed while asking.
+    codeChoice = null;
   }
   render();
   bg(refreshSession());
@@ -410,13 +417,46 @@ async function handleStart(): Promise<void> {
 
   // Only a fresh attempt resets the code. A session that already existed
   // (started in another tab) means you may have work in progress.
-  if (created && settings.resetCode) {
-    showNotice("↺ Resetting code to the default template…", 20_000);
-    const result = (await sendMessage({ type: "reset-code", slug })) as ResetCodeResult | undefined;
-    if (route?.slug !== slug) return;
-    if (result?.ok) showNotice("↺ Code reset to the default template", 3000);
-    else showNotice(`⚠️ Couldn't reset code: ${result?.reason ?? "no response"}`, 8000);
+  if (created && settings.resetCode) await resetCode(slug, false);
+}
+
+/**
+ * Resets the editor to the default template. Unforced, it leaves code that is
+ * already in the editor alone and asks instead: a fresh attempt on this
+ * device may follow work done on another one, which this device can't know.
+ */
+async function resetCode(slug: string, force: boolean): Promise<void> {
+  showNotice("↺ Resetting code to the default template…", 20_000);
+  const result = (await sendMessage({ type: "reset-code", slug, force })) as ResetCodeResult | undefined;
+  if (route?.slug !== slug) return;
+  if (result?.existingCode) {
+    notice = null;
+    codeChoice = { slug, busy: false };
+    render();
+    return;
   }
+  codeChoice = null;
+  if (result?.ok) showNotice("↺ Code reset to the default template", 3000);
+  else showNotice(`⚠️ Couldn't reset code: ${result?.reason ?? "no response"}`, 8000);
+}
+
+async function handleStartFresh(): Promise<void> {
+  if (!route || !codeChoice || codeChoice.slug !== route.slug || codeChoice.busy) return;
+  codeChoice = { ...codeChoice, busy: true };
+  render();
+  try {
+    await resetCode(route.slug, true);
+  } finally {
+    // Never leave the editor blurred out behind a stuck dialog.
+    if (codeChoice?.busy) codeChoice = null;
+    render();
+  }
+}
+
+function handleKeepCode(): void {
+  if (!codeChoice) return;
+  codeChoice = null;
+  showNotice("✓ Kept your code", 3000);
 }
 
 function handleBack(): void {

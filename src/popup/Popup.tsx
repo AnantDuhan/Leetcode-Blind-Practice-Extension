@@ -96,7 +96,8 @@ export default function Popup() {
       </label>
       <p className="mt-1 text-xs text-slate-400">
         Starting a fresh attempt replaces your saved code with the default template, like the
-        editor’s Reset button. Your submissions on LeetCode are not affected.
+        editor’s Reset button. If the editor already has code, you’re asked first. Your
+        submissions on LeetCode are not affected.
       </p>
 
       <label className="mt-4 block">

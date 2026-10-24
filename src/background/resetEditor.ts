@@ -5,6 +5,11 @@ import type { ResetCodeResult } from "../shared/messages";
  * result as the editor's Reset button, and removes drafts saved in other
  * languages so switching language doesn't reveal an old solution either.
  *
+ * Without `force`, it first checks the editor. If it holds anything other
+ * than a default template (work in progress from another device, or an old
+ * solution: the two can't be told apart), it changes nothing and returns
+ * `existingCode: true` so the user can choose. With `force`, it always resets.
+ *
  * Runs in the PAGE's JavaScript world (chrome.scripting, world: "MAIN"),
  * because the Monaco editor object isn't visible to content scripts. The
  * function is serialized, so it must be self-contained: no imports, no
@@ -20,7 +25,7 @@ import type { ResetCodeResult } from "../shared/messages";
  *   edit first (saves the template) and then setValue() the same text, which
  *   clears undo history so Ctrl+Z can't bring the old solution back.
  */
-export async function resetEditorToDefault(slug: string): Promise<ResetCodeResult> {
+export async function resetEditorToDefault(slug: string, force = false): Promise<ResetCodeResult> {
   interface Range { startLineNumber: number }
   interface Model {
     uri: { scheme: string };
@@ -41,6 +46,9 @@ export async function resetEditorToDefault(slug: string): Promise<ResetCodeResul
   }
 
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  // Line endings and trailing whitespace don't count as edits.
+  const normalize = (code: string) =>
+    code.replace(/\r\n?/g, "\n").split("\n").map((line) => line.trimEnd()).join("\n").trim();
   const parseJson = (raw: string | null): unknown => {
     try {
       return raw === null ? null : JSON.parse(raw);
@@ -93,7 +101,46 @@ export async function resetEditorToDefault(slug: string): Promise<ResetCodeResul
   const snippet = question.codeSnippets.find((s) => s.langSlug === lang);
   if (!snippet) return { ok: false, reason: `No default code for ${lang}.`, lang };
 
-  // 4. Remove drafts this problem has in other languages.
+  // Code that isn't empty and isn't any language's template is the user's.
+  const templates = new Set(question.codeSnippets.map((s) => normalize(s.code)));
+  const isUsersCode = (code: string) => {
+    const n = normalize(code);
+    return n !== "" && !templates.has(n);
+  };
+  if (!force) {
+    // LeetCode can restore a saved draft a little late on slow loads; give it
+    // a moment so we don't mistake a not-yet-restored editor for an empty one.
+    for (let i = 0; i < 6 && !isUsersCode(model.getValue()); i++) await sleep(250);
+    if (isUsersCode(model.getValue())) return { ok: false, existingCode: true, lang, reason: "The editor already has code." };
+  }
+
+  // 4. Replace the code. executeEdits makes LeetCode save it; setValue then
+  // clears undo history so the old solution can't be recovered with Ctrl+Z.
+  const replace = () => {
+    activeEditor.executeEdits("blind-practice-reset", [{ range: model.getFullModelRange(), text: snippet.code }]);
+    model.setValue(snippet.code);
+  };
+  const before = model.getValue();
+  replace();
+  // LeetCode's own draft restore can still land after our edit.
+  await sleep(1200);
+  const after = model.getValue();
+  if (after !== snippet.code && isUsersCode(after)) {
+    if (force) {
+      replace();
+    } else {
+      // Our edit already saved the template over that draft. Edit the user's
+      // code back in, so LeetCode saves it again, and let them choose.
+      model.setValue(snippet.code);
+      activeEditor.executeEdits("blind-practice-restore", [{ range: model.getFullModelRange(), text: after }]);
+      return { ok: false, existingCode: true, lang, reason: "The editor already has code." };
+    }
+  } else if (after === before && before !== snippet.code) {
+    replace();
+  }
+
+  // 5. Remove drafts this problem has in other languages. Done last, so a
+  // run that ends up keeping the user's code deletes nothing.
   let removedDrafts = 0;
   try {
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -123,20 +170,8 @@ export async function resetEditorToDefault(slug: string): Promise<ResetCodeResul
     }
     db.close();
   } catch {
-    // Not fatal: the current language is still reset below.
+    // Not fatal: the current language has already been reset.
   }
-
-  // 5. Replace the code. executeEdits makes LeetCode save it; setValue then
-  // clears undo history so the old solution can't be recovered with Ctrl+Z.
-  const replace = () => {
-    activeEditor.executeEdits("blind-practice-reset", [{ range: model.getFullModelRange(), text: snippet.code }]);
-    model.setValue(snippet.code);
-  };
-  const before = model.getValue();
-  replace();
-  // If LeetCode's own draft restore landed after our edit, do it once more.
-  await sleep(1200);
-  if (model.getValue() === before && before !== snippet.code) replace();
 
   return { ok: true, lang, removedDrafts };
 }

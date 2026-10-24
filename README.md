@@ -5,7 +5,7 @@ A Chrome extension that makes you think before you look. When you start a LeetCo
 ## How it works
 
 1. Open any problem. A card asks you to **Start solving**; that starts the timer for that problem.
-2. Starting a fresh attempt resets the editor to LeetCode's default template, the same as the editor's Reset button, so your old solution isn't sitting there. Drafts saved in other languages for that problem are cleared too. Your submissions on LeetCode are untouched.
+2. Starting a fresh attempt resets the editor to LeetCode's default template, the same as the editor's Reset button, so your old solution isn't sitting there. Drafts saved in other languages for that problem are cleared too. Your submissions on LeetCode are untouched. If the editor already has code in it (work from another device or browser, or an old solution; the extension can't tell which), nothing is changed until you choose **Start fresh** or **Keep my code**.
 3. Opening a locked section, by clicking its tab or visiting its URL directly, shows a lock screen with the time left.
 4. When the timer runs out, or as soon as you get **Accepted**, everything unlocks for that problem.
 
@@ -71,7 +71,7 @@ Click the extension icon:
 | --- | --- |
 | Enabled | Turns the extension on or off. |
 | Strict mode | On: no way to unlock early. Off: locked sections show a **Reveal anyway** button (click twice to confirm). |
-| Reset code on start | On (default): a fresh attempt replaces your saved code with the default template. |
+| Reset code on start | On (default): a fresh attempt replaces your saved code with the default template, asking first if the editor already has code. |
 | Think time | Minutes before solutions unlock, between 1 and 180. Default 30. |
 
 Changes apply to open LeetCode tabs immediately.

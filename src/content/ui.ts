@@ -30,6 +30,12 @@ export interface ViewState {
     paused: boolean;
     canRevealEarly: boolean;
   } | null;
+  /**
+   * Shown when a fresh attempt found code already in the editor, which may be
+   * work from another device or an old solution. The editor is blurred out
+   * until the user picks.
+   */
+  codeChoice: { busy: boolean } | null;
   /** One-time thank-you after the 10th solved problem. */
   thankYou: { solvedProblems: number } | null;
 }
@@ -42,6 +48,8 @@ export interface UiHandlers {
   onRestart: () => void;
   onSupport: () => void;
   onDismissThanks: () => void;
+  onStartFresh: () => void;
+  onKeepCode: () => void;
 }
 
 const HOST_ID = "lcbp-root";
@@ -142,6 +150,8 @@ export class PracticeUi {
   private startReview: HTMLDivElement;
   private thanksLayer: HTMLDivElement;
   private thanksTitle: HTMLElement;
+  private choiceLayer: HTMLDivElement;
+  private choiceButtons: HTMLButtonElement[];
   private lockLayer: HTMLDivElement;
   private lockTitle: HTMLHeadingElement;
   private lockText: HTMLParagraphElement;
@@ -184,6 +194,19 @@ export class PracticeUi {
         </div>
       </div>
 
+      <div class="backdrop hard" data-layer="choice" hidden>
+        <div class="card" role="dialog" aria-modal="true" aria-labelledby="lcbp-choice-title">
+          <h1 id="lcbp-choice-title">The editor already has code</h1>
+          <p>It may be work in progress from another device or browser, or an old solution.
+          Start fresh to replace it with the default template, or keep it and carry on.
+          Your timer is already running.</p>
+          <div class="actions">
+            <button class="primary" data-action="start-fresh">Start fresh</button>
+            <button class="ghost" data-action="keep-code">Keep my code</button>
+          </div>
+        </div>
+      </div>
+
       <div class="backdrop hard" data-layer="lock" hidden>
         <div class="card" role="dialog" aria-modal="true" aria-labelledby="lcbp-lock-title">
           <h1 id="lcbp-lock-title" data-ref="lock-title"></h1>
@@ -207,6 +230,8 @@ export class PracticeUi {
     this.startReview = q('[data-ref="start-review"]');
     this.thanksLayer = q('[data-layer="thanks"]');
     this.thanksTitle = q('[data-ref="thanks-title"]');
+    this.choiceLayer = q('[data-layer="choice"]');
+    this.choiceButtons = [q('[data-action="start-fresh"]'), q('[data-action="keep-code"]')];
     this.lockLayer = q('[data-layer="lock"]');
     this.lockTitle = q('[data-ref="lock-title"]');
     this.lockText = q('[data-ref="lock-text"]');
@@ -229,6 +254,8 @@ export class PracticeUi {
       handlers.onRestart();
     });
     q<HTMLButtonElement>('[data-action="back"]').addEventListener("click", handlers.onBack);
+    this.choiceButtons[0].addEventListener("click", handlers.onStartFresh);
+    this.choiceButtons[1].addEventListener("click", handlers.onKeepCode);
     this.revealButton.addEventListener("click", () => {
       // Two-step confirm instead of window.confirm(), which blocks the page.
       if (!this.confirmingReveal) {
@@ -282,12 +309,16 @@ export class PracticeUi {
           `${view.startCard.thinkTime} minute${view.startCard.thinkTime === 1 ? "" : "s"} ` +
           `after you start. The problem and the editor stay usable.` +
           (view.startCard.resetCode
-            ? " Your saved code for this problem will be replaced with the default template."
+            ? " The editor is reset to the default template. If it already has code in it, you'll be asked first."
             : ""),
       );
       setHidden(this.startReview, !view.startCard.review);
       setText(this.startReview, view.startCard.review ?? "");
     }
+
+    // Existing-code choice (the lock screen takes precedence)
+    setHidden(this.choiceLayer, !view.codeChoice || !!view.lock);
+    for (const button of this.choiceButtons) button.disabled = !!view.codeChoice?.busy;
 
     // Lock screen
     setHidden(this.lockLayer, !view.lock);

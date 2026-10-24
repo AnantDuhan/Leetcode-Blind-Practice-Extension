@@ -1,7 +1,8 @@
 /** Messages from the content script or popup to the background service worker. */
 export type ExtensionMessage =
   | { type: "badge"; text: string; state: "locked" | "paused" | "unlocked" }
-  | { type: "reset-code"; slug: string }
+  /** Without force, existing non-template code is left alone (see resetEditorToDefault). */
+  | { type: "reset-code"; slug: string; force?: boolean }
   | { type: "graphql"; query: string; variables: Record<string, unknown> }
   | { type: "open-dashboard"; hash?: string };
 
@@ -10,6 +11,8 @@ export interface ResetCodeResult {
   /** Why the reset was skipped or failed, when ok is false. */
   reason?: string;
   lang?: string;
+  /** True when nothing was changed because the editor already had the user's code. */
+  existingCode?: boolean;
   /** How many saved drafts in other languages were removed. */
   removedDrafts?: number;
 }

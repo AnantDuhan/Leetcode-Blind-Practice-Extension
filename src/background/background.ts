@@ -48,7 +48,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
             target: { tabId, frameIds: [sender.frameId ?? 0] },
             world: "MAIN",
             func: resetEditorToDefault,
-            args: [message.slug],
+            args: [message.slug, message.force === true],
           })
         : chrome.scripting.executeScript({
             target: { tabId, frameIds: [sender.frameId ?? 0] },

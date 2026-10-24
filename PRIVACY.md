@@ -26,6 +26,7 @@ The extension runs only on `leetcode.com`. It does not run on any other site. Al
 
 - requests the problem's default code template;
 - reads which programming language you have selected, from LeetCode's storage in your browser;
+- checks whether the editor already contains code. If it does, nothing is changed until you choose **Start fresh** or **Keep my code**;
 - replaces the code in the editor with the default template;
 - deletes the drafts LeetCode saved in your browser for that problem in other languages.
 
