@@ -5,7 +5,7 @@ const manifest: ManifestV3Export = {
 
   name: "No Peek: Solution Lock & Timer for LeetCode",
 
-  version: "1.3.0",
+  version: "1.4.0",
 
   description:
     "Hide previous solutions and improve problem-solving discipline.",

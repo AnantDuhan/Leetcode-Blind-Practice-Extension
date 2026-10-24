@@ -13,6 +13,8 @@
 export type PauseReason = "user" | "auto";
 
 export interface ProblemSession {
+  /** Identifies this attempt in the history. Kept across restarts. */
+  attemptId: number;
   /** Epoch ms of the (re)start. Used for the 24 h expiry. */
   startedAt: number;
   /** Solving time accumulated before the current running stretch, in ms. */
@@ -23,6 +25,10 @@ export interface ProblemSession {
   pausedBy?: PauseReason;
   /** Set when the user used "Reveal anyway" (only possible with strict mode off). */
   revealedEarly?: boolean;
+  /** Set when a solution section was opened before solving. */
+  peeked?: boolean;
+  /** Epoch ms of the first Accepted submission. Solving unlocks everything. */
+  solvedAt?: number;
 }
 
 type SessionMap = Record<string, ProblemSession>;
@@ -49,11 +55,14 @@ function normalize(raw: Partial<ProblemSession> | undefined): ProblemSession | n
   if (!raw || typeof raw.startedAt !== "number") return null;
   const legacy = raw.elapsedMs === undefined && raw.runningSince === undefined;
   return {
+    attemptId: typeof raw.attemptId === "number" ? raw.attemptId : raw.startedAt,
     startedAt: raw.startedAt,
     elapsedMs: legacy ? 0 : Math.max(0, Number(raw.elapsedMs) || 0),
     runningSince: legacy ? raw.startedAt : typeof raw.runningSince === "number" ? raw.runningSince : null,
     ...(raw.pausedBy ? { pausedBy: raw.pausedBy } : {}),
     ...(raw.revealedEarly ? { revealedEarly: true } : {}),
+    ...(raw.peeked ? { peeked: true } : {}),
+    ...(typeof raw.solvedAt === "number" ? { solvedAt: raw.solvedAt } : {}),
   };
 }
 
@@ -106,7 +115,7 @@ export async function getSession(slug: string): Promise<ProblemSession | null> {
 }
 
 function freshSession(now: number): ProblemSession {
-  return { startedAt: now, elapsedMs: 0, runningSince: now };
+  return { attemptId: now, startedAt: now, elapsedMs: 0, runningSince: now };
 }
 
 /**
@@ -147,16 +156,51 @@ export function resumeSession(slug: string, options: { onlyIfAuto?: boolean } = 
   });
 }
 
-/** Puts the full think time back and starts counting again. Code is not touched. */
+/**
+ * Puts the full think time back and starts counting again. Code is not
+ * touched, and it stays the same attempt in the history.
+ */
 export function restartSession(slug: string): Promise<void> {
-  return update(slug, (_current, now) => ({ next: freshSession(now), result: undefined }));
+  return update(slug, (current, now) => {
+    if (current?.solvedAt) return { next: null, result: undefined };
+    const next: ProblemSession = { ...freshSession(now), attemptId: current?.attemptId ?? now };
+    if (current?.peeked) next.peeked = true;
+    return { next, result: undefined };
+  });
 }
 
 export function markRevealedEarly(slug: string): Promise<void> {
   return update(slug, (current, now) => ({
-    next: { ...(current ?? freshSession(now)), revealedEarly: true },
+    next: { ...(current ?? freshSession(now)), revealedEarly: true, peeked: true },
     result: undefined,
   }));
+}
+
+/** Records that a solution section was opened before solving. */
+export function markSessionPeeked(slug: string): Promise<ProblemSession | null> {
+  return update(slug, (current) => {
+    if (!current || current.peeked || current.solvedAt) return { next: null, result: null };
+    const next = { ...current, peeked: true };
+    return { next, result: next };
+  });
+}
+
+/**
+ * Records the first Accepted submission: stops the clock (so the solve time
+ * is fixed) and unlocks everything. Returns null if already solved.
+ */
+export function markSessionSolved(slug: string, solvedAt: number): Promise<ProblemSession | null> {
+  return update(slug, (current) => {
+    if (!current || current.solvedAt) return { next: null, result: null };
+    const next: ProblemSession = {
+      ...current,
+      elapsedMs: elapsedMs(current, solvedAt),
+      runningSince: null,
+      solvedAt,
+    };
+    delete next.pausedBy;
+    return { next, result: next };
+  });
 }
 
 /** Calls `listener` when any tab or the popup changes a session. */

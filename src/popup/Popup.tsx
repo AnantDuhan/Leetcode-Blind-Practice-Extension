@@ -9,6 +9,9 @@ import {
   type UserSettings,
 } from "../storage/settings";
 import CurrentProblem from "./CurrentProblem";
+import DueSummary from "./DueSummary";
+import { openDashboard } from "./openDashboard";
+import { hasSupportLinks } from "../shared/support";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -55,6 +58,7 @@ export default function Popup() {
       <h1 className="text-xl font-bold">No Peek: Solution Lock & Timer for LeetCode</h1>
 
       {loaded && <CurrentProblem settings={savedSettings} />}
+      <DueSummary />
 
       <label className="mt-5 flex justify-between items-center">
         <span>Enabled</span>
@@ -124,6 +128,15 @@ export default function Popup() {
       </button>
       {saveState === "error" && (
         <p className="mt-2 text-xs text-red-400">Couldn’t save. Try again.</p>
+      )}
+
+      {hasSupportLinks() && (
+        <p className="mt-4 border-t border-slate-800 pt-3 text-center text-xs text-slate-400">
+          Free and ad-free.{" "}
+          <button className="text-violet-300 hover:underline" onClick={() => openDashboard("#support")}>
+            ♥ Support this project
+          </button>
+        </p>
       )}
     </div>
   );

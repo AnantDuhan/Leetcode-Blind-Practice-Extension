@@ -101,7 +101,19 @@ export default function CurrentProblem({ settings }: { settings: UserSettings })
       {settings.enabled && locked && (
         <div className="mt-3 flex gap-2">
           <button className="flex-1 rounded bg-slate-700 p-1.5 text-sm hover:bg-slate-600" onClick={togglePause}>
-            {paused ? "▶ Resume" : "⏸ Pause"}
+            <span className="inline-flex items-center gap-1.5">
+              <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                {paused ? (
+                  <path d="M4.5 2.8v10.4a.8.8 0 0 0 1.2.7l8.3-5.2a.8.8 0 0 0 0-1.4L5.7 2.1a.8.8 0 0 0-1.2.7z" fill="currentColor" />
+                ) : (
+                  <>
+                    <rect x="3.5" y="2.5" width="3" height="11" rx="1" fill="currentColor" />
+                    <rect x="9.5" y="2.5" width="3" height="11" rx="1" fill="currentColor" />
+                  </>
+                )}
+              </svg>
+              {paused ? "Resume" : "Pause"}
+            </span>
           </button>
           <button
             className={`flex-1 rounded p-1.5 text-sm ${

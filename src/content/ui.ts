@@ -1,4 +1,5 @@
 import type { LockedSection } from "./route";
+import { APP_NAME } from "../shared/brand";
 
 /**
  * All on-page UI lives in one shadow root, so LeetCode's CSS can't break it,
@@ -14,7 +15,12 @@ export interface ViewState {
     showControls: boolean;
   } | null;
   /** "Start solving" card shown once per problem; null hides it. */
-  startCard: { thinkTime: number; resetCode: boolean } | null;
+  startCard: {
+    thinkTime: number;
+    resetCode: boolean;
+    /** "Due for a blind re-solve. Last solved 7 days ago in 12:30." */
+    review: string | null;
+  } | null;
   /** Full-page lock over a locked section; null hides it. */
   lock: {
     section: LockedSection;
@@ -24,6 +30,8 @@ export interface ViewState {
     paused: boolean;
     canRevealEarly: boolean;
   } | null;
+  /** One-time thank-you after the 10th solved problem. */
+  thankYou: { solvedProblems: number } | null;
 }
 
 export interface UiHandlers {
@@ -32,9 +40,17 @@ export interface UiHandlers {
   onRevealEarly: () => void;
   onTogglePause: () => void;
   onRestart: () => void;
+  onSupport: () => void;
+  onDismissThanks: () => void;
 }
 
 const HOST_ID = "lcbp-root";
+
+// Inline SVG icons: emoji like ⏸ render as tofu or tiny glyphs on some systems.
+const ICON_PAUSE =
+  '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="1" fill="currentColor"/><rect x="9.5" y="2.5" width="3" height="11" rx="1" fill="currentColor"/></svg>';
+const ICON_PLAY =
+  '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4.5 2.8v10.4a.8.8 0 0 0 1.2.7l8.3-5.2a.8.8 0 0 0 0-1.4L5.7 2.1a.8.8 0 0 0-1.2.7z" fill="currentColor"/></svg>';
 
 const STYLES = `
   :host { all: initial; }
@@ -82,12 +98,36 @@ const STYLES = `
   .badge.paused { border-color: #f59e0b; color: #fcd34d; }
   .badge-text { padding: 3px 0; white-space: nowrap; }
   .icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
     min-width: 28px; height: 28px; padding: 0 8px; border-radius: 999px;
     background: #1f2937; color: #e5e7eb; border: 1px solid #374151;
     font-size: 13px; font-weight: 600; line-height: 1;
   }
   .icon-btn:hover { background: #374151; color: #fff; }
   .icon-btn.confirming { border-color: #ef4444; color: #fca5a5; }
+
+  .review {
+    margin: -6px 0 18px; padding: 10px 12px; border-radius: 10px;
+    background: rgba(124, 58, 237, .14); border: 1px solid rgba(167, 139, 250, .35);
+    color: #ddd6fe; font-size: 13px; line-height: 1.45;
+  }
+
+  .thanks {
+    position: fixed; right: 16px; bottom: 64px; z-index: 2147483645;
+    width: min(320px, calc(100vw - 32px));
+    background: #111827; color: #f9fafb; border: 1px solid #374151; border-radius: 14px;
+    padding: 14px 16px; box-shadow: 0 10px 30px rgba(0, 0, 0, .4);
+    font-size: 13px; line-height: 1.5;
+  }
+  .thanks strong { display: block; font-size: 14px; margin-bottom: 4px; padding-right: 24px; }
+  .thanks p { margin: 0 0 12px; color: #d1d5db; }
+  .thanks .actions { justify-content: flex-start; }
+  .thanks button { padding: 8px 14px; font-size: 13px; }
+  .close {
+    position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; padding: 0;
+    background: transparent; color: #9ca3af; border-radius: 999px; font-size: 16px;
+  }
+  .close:hover { color: #fff; background: #1f2937; }
 `;
 
 export class PracticeUi {
@@ -99,6 +139,9 @@ export class PracticeUi {
   private confirmingRestart: ReturnType<typeof setTimeout> | null = null;
   private startLayer: HTMLDivElement;
   private startText: HTMLParagraphElement;
+  private startReview: HTMLDivElement;
+  private thanksLayer: HTMLDivElement;
+  private thanksTitle: HTMLElement;
   private lockLayer: HTMLDivElement;
   private lockTitle: HTMLHeadingElement;
   private lockText: HTMLParagraphElement;
@@ -120,10 +163,21 @@ export class PracticeUi {
         <button class="icon-btn" data-action="restart" title="Restart timer: put the full think time back">↺</button>
       </div>
 
+      <div class="thanks" role="status" data-layer="thanks" hidden>
+        <button class="close" data-action="dismiss-thanks" aria-label="Dismiss">×</button>
+        <strong data-ref="thanks-title"></strong>
+        <p>This extension is free and built by one developer. If it's helping your practice, you can chip in. This note won't show again.</p>
+        <div class="actions">
+          <button class="primary" data-action="support">♥ Support</button>
+          <button class="ghost" data-action="dismiss-thanks">No thanks</button>
+        </div>
+      </div>
+
       <div class="backdrop soft" data-layer="start" hidden>
         <div class="card" role="dialog" aria-modal="true" aria-labelledby="lcbp-start-title">
-          <h1 id="lcbp-start-title">🧠 Blind Practice</h1>
+          <h1 id="lcbp-start-title">🧠 ${APP_NAME}</h1>
           <p data-ref="start-text"></p>
+          <div class="review" data-ref="start-review" hidden></div>
           <div class="actions">
             <button class="primary" data-action="start">Start solving</button>
           </div>
@@ -150,6 +204,9 @@ export class PracticeUi {
     this.restartButton = q('[data-action="restart"]');
     this.startLayer = q('[data-layer="start"]');
     this.startText = q('[data-ref="start-text"]');
+    this.startReview = q('[data-ref="start-review"]');
+    this.thanksLayer = q('[data-layer="thanks"]');
+    this.thanksTitle = q('[data-ref="thanks-title"]');
     this.lockLayer = q('[data-layer="lock"]');
     this.lockTitle = q('[data-ref="lock-title"]');
     this.lockText = q('[data-ref="lock-text"]');
@@ -158,6 +215,10 @@ export class PracticeUi {
 
     q<HTMLButtonElement>('[data-action="start"]').addEventListener("click", handlers.onStart);
     this.pauseButton.addEventListener("click", handlers.onTogglePause);
+    q<HTMLButtonElement>('[data-action="support"]').addEventListener("click", handlers.onSupport);
+    root.querySelectorAll('[data-action="dismiss-thanks"]').forEach((button) =>
+      button.addEventListener("click", handlers.onDismissThanks),
+    );
     this.restartButton.addEventListener("click", () => {
       // Two-step, so a stray click can't throw away the time already spent.
       if (!this.confirmingRestart) {
@@ -196,13 +257,19 @@ export class PracticeUi {
       this.badge.classList.toggle("paused", state === "paused");
       setHidden(this.pauseButton, !showControls);
       setHidden(this.restartButton, !showControls);
-      setText(this.pauseButton, state === "paused" ? "▶" : "⏸");
       const pauseLabel = state === "paused" ? "Resume timer" : "Pause timer";
       if (this.pauseButton.title !== pauseLabel) {
         this.pauseButton.title = pauseLabel;
         this.pauseButton.setAttribute("aria-label", pauseLabel);
+        this.pauseButton.innerHTML = state === "paused" ? ICON_PLAY : ICON_PAUSE;
       }
       if (!showControls) this.setConfirmingRestart(false);
+    }
+
+    // One-time thank-you
+    setHidden(this.thanksLayer, !view.thankYou);
+    if (view.thankYou) {
+      setText(this.thanksTitle, `🎉 ${view.thankYou.solvedProblems} problems solved with ${APP_NAME}`);
     }
 
     // Start card (never shown on top of the lock screen)
@@ -218,6 +285,8 @@ export class PracticeUi {
             ? " Your saved code for this problem will be replaced with the default template."
             : ""),
       );
+      setHidden(this.startReview, !view.startCard.review);
+      setText(this.startReview, view.startCard.review ?? "");
     }
 
     // Lock screen

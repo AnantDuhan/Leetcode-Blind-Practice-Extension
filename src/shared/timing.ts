@@ -3,7 +3,7 @@ import type { UserSettings } from "../storage/settings";
 
 /** Solving time left until unlock, 0 once unlocked or revealed early. */
 export function remainingMs(session: ProblemSession, settings: UserSettings, now = Date.now()): number {
-  if (session.revealedEarly) return 0;
+  if (session.revealedEarly || session.solvedAt) return 0;
   return Math.max(0, settings.thinkTime * 60_000 - elapsedMs(session, now));
 }
 

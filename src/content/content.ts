@@ -3,6 +3,8 @@ import {
   getSession,
   isPaused,
   markRevealedEarly,
+  markSessionPeeked,
+  markSessionSolved,
   onSessionsChanged,
   pauseSession,
   restartSession,
@@ -10,9 +12,31 @@ import {
   startSession,
   type ProblemSession,
 } from "../storage/sessions";
+import {
+  beginAttempt,
+  getFlags,
+  getHistory,
+  onHistoryChanged,
+  recordPeek,
+  recordSolve,
+  saveMeta,
+  setFlag,
+  type ProblemRecord,
+} from "../storage/history";
 import type { ExtensionMessage, ResetCodeResult } from "../shared/messages";
+import { isDue, relativeDays } from "../shared/review";
+import { lastSolved } from "../shared/stats";
 import { badgeText, formatRemaining, remainingMs } from "../shared/timing";
-import { descriptionUrl, lockedSectionForTarget, parseRoute, type LockedSection, type ProblemRoute } from "./route";
+import {
+  descriptionUrl,
+  isSubmitShortcut,
+  isSubmitTarget,
+  lockedSectionForTarget,
+  parseRoute,
+  type LockedSection,
+  type ProblemRoute,
+} from "./route";
+import { fetchMeta, scanSubmissions } from "./tracker";
 import { PracticeUi, type ViewState } from "./ui";
 
 /**
@@ -28,6 +52,11 @@ import { PracticeUi, type ViewState } from "./ui";
  * A tab pauses the timer when it becomes hidden, unloads, or navigates to a
  * different problem; any visible tab on that problem resumes it on its next
  * tick. A pause the user made with the button is never resumed automatically.
+ *
+ * History: starting records an attempt; opening a solution section before
+ * solving records a peek; the first Accepted submission (found by polling
+ * your submission list after you press Submit) records the solve, stops the
+ * clock, unlocks everything and schedules the next blind re-solve.
  */
 
 const TICK_MS = 500;
@@ -48,6 +77,17 @@ let notice: { text: string; until: number } | null = null;
 let lastToolbarBadge = "";
 /** True while an auto-pause or auto-resume write is in flight. */
 let autoPauseBusy = false;
+/** History record for the current problem, for the start card's review note. */
+let problemRecord: ProblemRecord | null = null;
+/** Set while the one-time thank-you is on screen. */
+let thankYou: { solvedProblems: number } | null = null;
+/** Polling for an Accepted submission after Submit was pressed. */
+let watch: { slug: string; until: number; timer: ReturnType<typeof setTimeout> | null } | null = null;
+
+const WATCH_FIRST_POLL_MS = 2500;
+const WATCH_INTERVAL_MS = 3000;
+const WATCH_DURATION_MS = 120_000;
+const THANK_YOU_AFTER = 10;
 
 const ui = new PracticeUi({
   onStart: () => void handleStart(),
@@ -55,6 +95,15 @@ const ui = new PracticeUi({
   onRevealEarly: () => void handleRevealEarly(),
   onTogglePause: () => void handleTogglePause(),
   onRestart: () => void handleRestart(),
+  onSupport: () => {
+    thankYou = null;
+    void sendMessage({ type: "open-dashboard", hash: "#support" });
+    render();
+  },
+  onDismissThanks: () => {
+    thankYou = null;
+    render();
+  },
 });
 
 function isLocked(now = Date.now()): boolean {
@@ -84,7 +133,7 @@ function updateToolbarBadge(now: number): void {
 
 function buildView(now: number): ViewState {
   if (!ready || !settings.enabled || !route) {
-    return { badge: null, startCard: null, lock: null };
+    return { badge: null, startCard: null, lock: null, thankYou: null };
   }
 
   const locked = isLocked(now);
@@ -100,7 +149,9 @@ function buildView(now: number): ViewState {
     const state = !locked ? "unlocked" : paused ? "paused" : "locked";
     const text =
       noticeText ??
-      (state === "unlocked"
+      (session.solvedAt
+        ? `✅ Solved in ${formatRemaining(session.elapsedMs)}`
+        : state === "unlocked"
         ? "🔓 Solutions unlocked"
         : state === "paused"
           ? `⏸ Paused · ${remaining} left`
@@ -110,7 +161,9 @@ function buildView(now: number): ViewState {
 
   return {
     badge,
-    startCard: session ? null : { thinkTime: settings.thinkTime, resetCode: settings.resetCode },
+    startCard: session
+      ? null
+      : { thinkTime: settings.thinkTime, resetCode: settings.resetCode, review: reviewNote(problemRecord, now) },
     lock: lockSection
       ? {
           section: lockSection,
@@ -120,7 +173,22 @@ function buildView(now: number): ViewState {
           canRevealEarly: !settings.strictMode,
         }
       : null,
+    thankYou,
   };
+}
+
+/** The start card's note about your last attempt at this problem. */
+function reviewNote(record: ProblemRecord | null, now: number): string | null {
+  if (!record?.attempts.length) return null;
+  const solved = lastSolved(record);
+  if (!solved?.solvedAt) {
+    return "Last time you opened a solution before solving this one. Try it blind again.";
+  }
+  const how = `${relativeDays(solved.solvedAt, now)} in ${formatRemaining(solved.solveMs ?? 0)}` +
+    (solved.peekedAt !== undefined && solved.peekedAt <= solved.solvedAt ? ", after peeking" : "");
+  if (isDue(record.review, now)) return `🔁 Due for a blind re-solve. You last solved it ${how}.`;
+  const next = record.review?.dueAt && !record.review.retired ? ` Next re-solve is ${relativeDays(record.review.dueAt, now)}.` : "";
+  return `You solved this ${how}.${next}`;
 }
 
 function render(): void {
@@ -137,10 +205,87 @@ function showNotice(text: string, ms = 6000): void {
 async function refreshSession(): Promise<void> {
   const request = ++sessionRequest;
   const slug = route?.slug;
-  const next = slug ? await getSession(slug) : null;
+  const [next, history] = slug ? await Promise.all([getSession(slug), getHistory()]) : [null, null];
   if (request !== sessionRequest) return;
   session = next;
+  problemRecord = slug && history ? (history[slug] ?? null) : null;
   render();
+  trackPeek();
+}
+
+/** Opening a solution section after unlock, but before solving, counts as a peek. */
+function trackPeek(section: LockedSection | null = route?.lockedSection ?? null): void {
+  if (!section || !route || !session || session.solvedAt || session.peeked || isLocked()) return;
+  const slug = route.slug;
+  const attemptId = session.attemptId;
+  session = { ...session, peeked: true };
+  void markSessionPeeked(slug).then(() => recordPeek(slug, attemptId, Date.now()));
+}
+
+/**
+ * Polls your submission list for an Accepted result after you press Submit.
+ * With durationMs 0 it checks once (used when the tab becomes visible again).
+ */
+function watchForAccepted(durationMs = WATCH_DURATION_MS): void {
+  if (!ready || !settings.enabled || !route || !session || session.solvedAt) return;
+  const slug = route.slug;
+  const until = Date.now() + durationMs;
+  if (watch?.slug === slug) {
+    watch.until = Math.max(watch.until, until);
+    return;
+  }
+  if (watch?.timer) clearTimeout(watch.timer);
+  watch = { slug, until, timer: null };
+  const poll = async () => {
+    if (!watch || watch.slug !== slug) return;
+    watch.timer = null;
+    const current = route?.slug === slug ? session : null;
+    if (!current || current.solvedAt) {
+      watch = null;
+      return;
+    }
+    const scan = await scanSubmissions(sendMessage, slug, current.attemptId);
+    if (scan?.accepted) {
+      watch = null;
+      await handleSolved(slug, scan.wrong);
+      return;
+    }
+    if (watch && Date.now() < watch.until) watch.timer = setTimeout(() => void poll(), WATCH_INTERVAL_MS);
+    else watch = null;
+  };
+  watch.timer = setTimeout(() => void poll(), WATCH_FIRST_POLL_MS);
+}
+
+async function handleSolved(slug: string, wrongSubmissions: number): Promise<void> {
+  const solved = await markSessionSolved(slug, Date.now());
+  if (!solved?.solvedAt) return;
+  if (route?.slug === slug) session = solved;
+
+  const result = await recordSolve(slug, solved.attemptId, {
+    solvedAt: solved.solvedAt,
+    solveMs: solved.elapsedMs,
+    peeked: !!solved.peeked,
+    wrongSubmissions,
+  });
+  if (route?.slug === slug) problemRecord = result.record;
+
+  const next = result.record.review?.dueAt;
+  showNotice(
+    `✅ Accepted in ${formatRemaining(solved.elapsedMs)}` + (next ? ` · re-solve ${relativeDays(next, Date.now())}` : ""),
+    8000,
+  );
+
+  if (result.solvedProblems >= THANK_YOU_AFTER && !(await getFlags()).thankYouShown) {
+    await setFlag("thankYouShown", true);
+    thankYou = { solvedProblems: result.solvedProblems };
+    render();
+  }
+}
+
+function handleSubmitIntent(event: Event): void {
+  const isSubmit =
+    event.type === "keydown" ? isSubmitShortcut(event as KeyboardEvent) : isSubmitTarget(event.target);
+  if (isSubmit) watchForAccepted();
 }
 
 function handleRouteChange(): void {
@@ -153,18 +298,31 @@ function handleRouteChange(): void {
   }
   route = next;
   interceptedSection = null;
-  if (!sameProblem) session = null;
+  if (!sameProblem) {
+    session = null;
+    problemRecord = null;
+  }
   render();
   void refreshSession();
+  // LeetCode may open the result page after a submit.
+  if (/\/submissions\/\d+/.test(location.pathname)) watchForAccepted();
 }
 
 async function handleStart(): Promise<void> {
   if (!route) return;
   const slug = route.slug;
+  const wasDue = isDue(problemRecord?.review, Date.now());
   const { session: started, created } = await startSession(slug);
   if (route?.slug !== slug) return;
   session = started;
   render();
+
+  if (created) {
+    void beginAttempt(slug, started.attemptId, wasDue);
+    if (!problemRecord?.meta) {
+      void fetchMeta(sendMessage, slug).then((meta) => meta && saveMeta(slug, meta));
+    }
+  }
 
   // Only a fresh attempt resets the code. A session that already existed
   // (started in another tab) means you may have work in progress.
@@ -221,12 +379,19 @@ function maybeAutoResume(): void {
 
 function handleVisibilityChange(): void {
   if (document.visibilityState === "hidden") autoPause();
-  else maybeAutoResume();
+  else {
+    maybeAutoResume();
+    // You may have submitted from another tab or device meanwhile.
+    if (session && !session.solvedAt) watchForAccepted(0);
+  }
 }
 
 async function handleRevealEarly(): Promise<void> {
-  if (!route || settings.strictMode) return;
-  await markRevealedEarly(route.slug);
+  if (!route || !session || settings.strictMode) return;
+  const { slug } = route;
+  const { attemptId } = session;
+  await markRevealedEarly(slug);
+  await recordPeek(slug, attemptId, Date.now());
   await refreshSession();
 }
 
@@ -236,8 +401,14 @@ async function handleRevealEarly(): Promise<void> {
  * target's ancestors are inspected; the page is never scanned.
  */
 function interceptLockedInteraction(event: Event): void {
-  if (!isLocked()) return;
   if (event.composedPath().includes(ui.element)) return;
+  if (!isLocked()) {
+    // Unlocked: let it through, but note a peek before solving.
+    if (event.type === "pointerdown" && session && !session.solvedAt && !session.peeked) {
+      trackPeek(lockedSectionForTarget(event.target));
+    }
+    return;
+  }
 
   const section = lockedSectionForTarget(event.target);
   if (!section) return;
@@ -266,6 +437,9 @@ async function main(): Promise<void> {
   window.addEventListener("popstate", handleRouteChange);
   document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("pagehide", autoPause);
+  window.addEventListener("click", handleSubmitIntent, { capture: true });
+  window.addEventListener("keydown", handleSubmitIntent, { capture: true });
+  onHistoryChanged(() => void refreshSession());
 
   handleRouteChange();
   // A problem opened in a background tab shouldn't keep a running timer going.

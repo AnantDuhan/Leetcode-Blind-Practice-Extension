@@ -10,9 +10,12 @@
  *   carry stable ids: #editorial_tab, #solutions_tab, #submissions_tab.
  * - Discussion is an expandable row on the Description tab whose text starts
  *   with "Discussion (" and does not change the URL.
+ * - The AI assistant opens from a button with aria-label "Ask Leet".
+ * - Submit is button[data-e2e-locator="console-submit-button"], shortcut
+ *   Cmd/Ctrl+Enter. Run is "console-run-button" and must not count.
  */
 
-export type LockedSection = "Editorial" | "Solutions" | "Submissions" | "Discussion";
+export type LockedSection = "Editorial" | "Solutions" | "Submissions" | "Discussion" | "Ask Leet (AI)";
 
 export interface ProblemRoute {
   slug: string;
@@ -69,6 +72,8 @@ export function lockedSectionForTarget(target: EventTarget | null): LockedSectio
   // Never interfere with the code editor (its tokens can contain "Solution").
   if (target.closest(".monaco-editor")) return null;
 
+  if (target.closest('[aria-label="Ask Leet"]')) return "Ask Leet (AI)";
+
   const tabButton = target.closest(".flexlayout__tab_button");
   if (tabButton) {
     for (const [id, section] of Object.entries(TAB_IDS)) {
@@ -89,4 +94,14 @@ export function lockedSectionForTarget(target: EventTarget | null): LockedSectio
     }
   }
   return null;
+}
+
+/** True when the event target is LeetCode's Submit button. */
+export function isSubmitTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest('[data-e2e-locator="console-submit-button"]');
+}
+
+/** True for LeetCode's submit shortcut, Cmd+Enter on Mac and Ctrl+Enter elsewhere. */
+export function isSubmitShortcut(event: KeyboardEvent): boolean {
+  return event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
 }

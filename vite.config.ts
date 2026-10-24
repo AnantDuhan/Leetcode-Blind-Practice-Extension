@@ -10,5 +10,11 @@ export default defineConfig({
     react(),
     tailwindcss(),
     crx({ manifest })
-  ]
+  ],
+  build: {
+    rollupOptions: {
+      // Extension pages the manifest doesn't reference directly.
+      input: { dashboard: "dashboard.html" }
+    }
+  }
 });

@@ -1,7 +1,7 @@
 {
   "name": "leetcode-blind-practice",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@crxjs/vite-plugin": "^2.6.1",
+    "qrcode-generator": "1.4.4",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },

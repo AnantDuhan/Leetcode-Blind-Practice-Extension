@@ -7,7 +7,26 @@ A Chrome extension that makes you think before you look. When you start a LeetCo
 1. Open any problem. A card asks you to **Start solving**; that starts the timer for that problem.
 2. Starting a fresh attempt resets the editor to LeetCode's default template, the same as the editor's Reset button, so your old solution isn't sitting there. Drafts saved in other languages for that problem are cleared too. Your submissions on LeetCode are untouched.
 3. Opening a locked section, by clicking its tab or visiting its URL directly, shows a lock screen with the time left.
-4. When the timer runs out, everything unlocks for that problem.
+4. When the timer runs out, or as soon as you get **Accepted**, everything unlocks for that problem.
+
+The AI assistant (**Ask Leet**) is locked during think time too.
+
+## Practice history and blind re-solves
+
+Every attempt is recorded locally: how long you took (pauses excluded), how many wrong submissions came before Accepted, and whether you opened a solution section first.
+
+Solved problems come back for a **blind re-solve** on a schedule:
+
+| Result | Next re-solve |
+| --- | --- |
+| Solved without peeking | 3 days, then 7, 14, 30, 60 and 120 days |
+| Peeked before solving (solved or not) | tomorrow, and the ladder starts over |
+
+Opening a due problem says so on the start card. The toolbar icon shows how many problems are due when you're not on a problem page.
+
+**Dashboard** (popup → Dashboard): the re-solve queue, your slowest topics, stats by difficulty, recent attempts, and export/import of your history.
+
+How a solve is detected: when you press Submit (or Cmd/Ctrl+Enter), the extension checks your submission list for that problem on LeetCode for up to two minutes. Run never counts.
 
 ## Where the timer shows
 
@@ -34,6 +53,15 @@ The timer is tracked **per problem** and saved, so:
 - coming back to a problem within 24 hours keeps its timer; after 24 hours it counts as a fresh attempt.
 
 Submitting your code still shows you the result. Only the list of your past submissions is locked.
+
+## Supporting the project
+
+The popup footer and the dashboard link to donations, and after your 10th solved problem a one-time thank-you note appears; it never shows again. Configure the links in `src/shared/support.ts`:
+
+- `githubSponsorsUrl`: turn on GitHub Sponsors for your account first, or the link is a 404.
+- `upiId` and `upiPayeeName`: when set, the dashboard shows a UPI QR code and a copy button.
+
+Leave a value empty to hide that option.
 
 ## Settings
 
@@ -70,7 +98,12 @@ src/
   storage/
     settings.ts  user settings (chrome.storage.sync)
     sessions.ts  per-problem start times (chrome.storage.local)
-  shared/        timer math and message types
+  content/
+    tracker.ts   problem details and submission checks (LeetCode GraphQL)
+  dashboard/     history, re-solve queue and stats page (React + Tailwind)
+  storage/
+    history.ts   attempts and re-solve schedule (chrome.storage.local)
+  shared/        timer math, re-solve rules, stats, messages, donation links
   popup/         settings and live timer (React + Tailwind)
   background/
     background.ts   toolbar badge, runs the code reset
@@ -97,7 +130,7 @@ node scripts/render-icons.mjs
 - `scripting`: runs the code reset inside the LeetCode page, where the code editor lives.
 - Host access to `leetcode.com`: the content script runs there and nowhere else.
 
-Settings sync through your Chrome account like any extension's synced settings. Nothing is sent anywhere else.
+Settings sync through your Chrome account like any extension's synced settings. Your practice history stays in this browser (export it from the dashboard to back it up). Nothing is sent anywhere else.
 
 ## Tech
 
